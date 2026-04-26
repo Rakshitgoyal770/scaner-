@@ -18,6 +18,7 @@ export interface MarkerAnalysis {
   isMarkerLike: boolean;
   isDesiredMarker: boolean;
   centerCropFilePath: string;
+  bestRotation: number;
   metrics: {
     topBorder: number;
     rightBorder: number;
@@ -32,11 +33,12 @@ export interface MarkerAnalysis {
     darkCornerCount: number;
     brightCornerCount: number;
     anchorContrast: number;
+    hasAnchorCandidate: number;
+    anchorFillRatio: number;
     centerBrightness: number;
     centerStd: number;
     centerSaturation: number;
     ringBrightness: number;
-    warningRedness: number;
     centerDarkRatio: number;
   };
   reason: string;
@@ -112,10 +114,6 @@ function saturation({ r, g, b }: RgbPixel) {
   return ((max - min) / max) * 255;
 }
 
-function redness({ r, g, b }: RgbPixel) {
-  return r - (g + b) / 2;
-}
-
 function sampleRegion(
   pixels: Uint8Array,
   width: number,
@@ -156,31 +154,6 @@ function sampleRegion(
   };
 }
 
-function sampleRedness(
-  pixels: Uint8Array,
-  width: number,
-  height: number,
-  pixelFormat: PixelFormat,
-  region: { x: number; y: number; w: number; h: number }
-) {
-  const startX = clamp(Math.floor(region.x), 0, width - 1);
-  const startY = clamp(Math.floor(region.y), 0, height - 1);
-  const endX = clamp(Math.ceil(region.x + region.w), startX + 1, width);
-  const endY = clamp(Math.ceil(region.y + region.h), startY + 1, height);
-
-  let sum = 0;
-  let count = 0;
-
-  for (let y = startY; y < endY; y += 1) {
-    for (let x = startX; x < endX; x += 1) {
-      sum += redness(getPixel(pixels, width, x, y, pixelFormat));
-      count += 1;
-    }
-  }
-
-  return count > 0 ? sum / count : 0;
-}
-
 function sampleDarkRatio(
   pixels: Uint8Array,
   width: number,
@@ -209,44 +182,83 @@ function sampleDarkRatio(
   return count > 0 ? darkCount / count : 0;
 }
 
-export async function analyzeMarkerImage(image: NitroImage): Promise<MarkerAnalysis> {
-  const cropSize = Math.floor(Math.min(image.width, image.height) * 0.56);
-  const startX = Math.floor((image.width - cropSize) / 2);
-  const startY = Math.floor((image.height - cropSize) / 2);
-  const cropped = await image.cropAsync(startX, startY, startX + cropSize, startY + cropSize);
-  const normalized = await cropped.resizeAsync(NORMALIZED_SIZE, NORMALIZED_SIZE);
+function getAnalysisScore(metrics: MarkerAnalysis["metrics"]) {
+  const borderBonus =
+    metrics.darkBorderSides === 4
+      ? 260
+      : metrics.darkBorderSides === 3
+        ? 80
+        : -120;
+  const anchorCountBonus =
+    metrics.darkCornerCount === 1
+      ? 220
+      : metrics.darkCornerCount === 0
+        ? -140
+        : -220;
+  const brightCornerBonus =
+    metrics.brightCornerCount >= 2
+      ? 50
+      : metrics.brightCornerCount === 1
+        ? 10
+        : -40;
+  const anchorCandidateBonus = metrics.hasAnchorCandidate === 1 ? 120 : -120;
+  const anchorSizePenalty =
+    metrics.anchorFillRatio > 0.85
+      ? 140
+      : metrics.anchorFillRatio < 0.2
+        ? 60
+        : 0;
+  const payloadPenalty = metrics.centerDarkRatio * 140 + anchorSizePenalty;
+
+  return (
+    borderBonus +
+    anchorCountBonus +
+    brightCornerBonus +
+    anchorCandidateBonus +
+    Math.min(80, metrics.anchorContrast * 2.5) +
+    Math.min(80, metrics.centerSaturation * 0.8) +
+    Math.min(60, metrics.centerStd) -
+    payloadPenalty
+  );
+}
+
+async function analyzeNormalizedImage(
+  normalized: NitroImage,
+  bestRotation: number
+): Promise<MarkerAnalysis> {
   const raw = await normalized.toRawPixelDataAsync(false);
   const pixels = new Uint8Array(raw.buffer);
   const width = raw.width;
   const height = raw.height;
-  const borderThickness = width * 0.14;
-  const cornerSize = width * 0.2;
-  const anchorInset = width * 0.12;
-  const anchorSize = width * 0.16;
+  const borderThickness = width * 0.09;
+  const borderInset = width * 0.14;
+  const cornerSize = width * 0.18;
+  const anchorInset = width * 0.09;
+  const anchorSize = width * 0.11;
 
   const topBorderRegion = {
-    x: width * 0.08,
+    x: borderInset,
     y: 0,
-    w: width * 0.84,
+    w: width - borderInset * 2,
     h: borderThickness,
   };
   const rightBorderRegion = {
     x: width - borderThickness,
-    y: height * 0.08,
+    y: borderInset,
     w: borderThickness,
-    h: height * 0.84,
+    h: height - borderInset * 2,
   };
   const bottomBorderRegion = {
-    x: width * 0.08,
+    x: borderInset,
     y: height - borderThickness,
-    w: width * 0.84,
+    w: width - borderInset * 2,
     h: borderThickness,
   };
   const leftBorderRegion = {
     x: 0,
-    y: height * 0.08,
+    y: borderInset,
     w: borderThickness,
-    h: height * 0.84,
+    h: height - borderInset * 2,
   };
   const topBorderStats = sampleRegion(
     pixels,
@@ -376,12 +388,60 @@ export async function analyzeMarkerImage(image: NitroImage): Promise<MarkerAnaly
       h: anchorSize,
     }).meanBrightness,
   ];
-  const warningRedness = sampleRedness(pixels, width, height, raw.pixelFormat, {
-    x: width * 0.62,
-    y: height * 0.62,
-    w: width * 0.24,
-    h: height * 0.24,
-  });
+  const anchorDarkRatios = [
+    sampleDarkRatio(
+      pixels,
+      width,
+      height,
+      raw.pixelFormat,
+      {
+        x: anchorInset,
+        y: anchorInset,
+        w: anchorSize,
+        h: anchorSize,
+      },
+      120
+    ),
+    sampleDarkRatio(
+      pixels,
+      width,
+      height,
+      raw.pixelFormat,
+      {
+        x: width - anchorInset - anchorSize,
+        y: anchorInset,
+        w: anchorSize,
+        h: anchorSize,
+      },
+      120
+    ),
+    sampleDarkRatio(
+      pixels,
+      width,
+      height,
+      raw.pixelFormat,
+      {
+        x: anchorInset,
+        y: height - anchorInset - anchorSize,
+        w: anchorSize,
+        h: anchorSize,
+      },
+      120
+    ),
+    sampleDarkRatio(
+      pixels,
+      width,
+      height,
+      raw.pixelFormat,
+      {
+        x: width - anchorInset - anchorSize,
+        y: height - anchorInset - anchorSize,
+        w: anchorSize,
+        h: anchorSize,
+      },
+      120
+    ),
+  ];
   const centerDarkRatio = sampleDarkRatio(
     pixels,
     width,
@@ -397,19 +457,47 @@ export async function analyzeMarkerImage(image: NitroImage): Promise<MarkerAnaly
   );
 
   const borderChecks = [
-    topBorder < 185 && topBorderDarkRatio > 0.28,
-    rightBorder < 185 && rightBorderDarkRatio > 0.28,
-    bottomBorder < 185 && bottomBorderDarkRatio > 0.28,
-    leftBorder < 185 && leftBorderDarkRatio > 0.28,
+    topBorder < 220 && topBorderDarkRatio > 0.12,
+    rightBorder < 220 && rightBorderDarkRatio > 0.12,
+    bottomBorder < 220 && bottomBorderDarkRatio > 0.12,
+    leftBorder < 220 && leftBorderDarkRatio > 0.12,
   ];
   const darkBorderSides = borderChecks.filter(Boolean).length;
-  const darkCornerCount = anchorCorners.filter((value) => value < 120).length;
-  const brightCornerCount = anchorCorners.filter((value) => value > 165).length;
-  const darkestCorner = Math.min(...anchorCorners);
-  const secondDarkestCorner =
-    [...anchorCorners].sort((a, b) => a - b)[1] ?? darkestCorner;
+  const sortedAnchorCorners = [...anchorCorners].sort((a, b) => a - b);
+  const darkestCorner = sortedAnchorCorners[0] ?? 255;
+  const secondDarkestCorner = sortedAnchorCorners[1] ?? darkestCorner;
+  const validAnchorMin = 0.08;
+  const validAnchorMax = 0.9;
+  const sortedAnchorDarkRatios = [...anchorDarkRatios].sort((a, b) => b - a);
+  const anchorFillRatio = sortedAnchorDarkRatios[0] ?? 0;
+  const secondAnchorFillRatio = sortedAnchorDarkRatios[1] ?? 0;
+  const anchorFillContrast = anchorFillRatio - secondAnchorFillRatio;
+  const bestAnchorIndex = anchorDarkRatios.findIndex(
+    (value) => value === anchorFillRatio
+  );
+  const darkCornerCount = anchorDarkRatios.filter(
+    (value) => value >= validAnchorMin && value <= validAnchorMax
+  ).length;
+  const brightCornerCount = anchorCorners.filter(
+    (value, index) => index !== bestAnchorIndex && value > 150
+  ).length;
   const anchorContrast = secondDarkestCorner - darkestCorner;
+  const hasAnchorCandidate =
+    anchorFillRatio >= validAnchorMin &&
+    anchorFillRatio <= validAnchorMax &&
+    (anchorFillContrast >= 0.01 || darkestCorner < 210 || anchorContrast > 0.5)
+      ? 1
+      : 0;
   const centerVsRingDelta = center.meanBrightness - ring.meanBrightness;
+  const coreMarkerMatch =
+    darkBorderSides >= 4 &&
+    center.meanSaturation > 45 &&
+    center.brightnessStd > 18 &&
+    (hasAnchorCandidate === 1 || anchorFillRatio >= validAnchorMin || darkestCorner < 210);
+  const explicitWrongMarker =
+    centerDarkRatio >= 0.16 ||
+    center.meanSaturation < 32 ||
+    center.brightnessStd < 14;
 
   const isMarkerLike =
     darkBorderSides >= 3 &&
@@ -417,32 +505,37 @@ export async function analyzeMarkerImage(image: NitroImage): Promise<MarkerAnaly
     center.meanBrightness > 85;
   const isDesiredMarker =
     isMarkerLike &&
-    darkBorderSides >= 4 &&
-    darkCornerCount >= 1 &&
-    darkCornerCount <= 1 &&
-    brightCornerCount >= 1 &&
-    anchorContrast > 10 &&
-    center.meanSaturation > 18 &&
-    center.brightnessStd > 22 &&
-    centerVsRingDelta > -24 &&
-    warningRedness < 22 &&
-    centerDarkRatio < 0.16;
+    !explicitWrongMarker &&
+    (
+      coreMarkerMatch ||
+      (
+        darkBorderSides >= 4 &&
+        center.meanSaturation > 45 &&
+        center.brightnessStd > 18 &&
+        (hasAnchorCandidate === 1 || anchorFillRatio >= validAnchorMin || darkestCorner < 210) &&
+        centerVsRingDelta > -24
+      )
+    );
 
   let reason = "Marker not found inside the guide frame.";
   if (isDesiredMarker) {
     reason = "Marker 1-like pattern found in the captured guide area.";
   } else if (isMarkerLike) {
-    if (darkBorderSides < 4) {
-      reason = "Square found, but not all four outer borders were confirmed.";
-    } else if (darkCornerCount !== 1) {
-      reason = "Square found, but the inset anchor check did not isolate exactly one dark corner.";
-    } else if (anchorContrast <= 10) {
-      reason = "Square found, but the anchor corner was not distinct enough.";
-    } else if (warningRedness >= 22) {
-      reason = "Square found, but it contains a red warning-like mark in the lower-right.";
-    } else if (centerDarkRatio >= 0.16) {
+    if (explicitWrongMarker && centerDarkRatio >= 0.16) {
       reason = "Square found, but it contains too much solid dark content in the center.";
-    } else if (center.meanSaturation <= 18 || center.brightnessStd <= 22) {
+    } else if (explicitWrongMarker && center.meanSaturation < 32) {
+      reason = "Square found, but the inner marker content is too plain to match the target marker.";
+    } else if (explicitWrongMarker && center.brightnessStd < 14) {
+      reason = "Square found, but the inner marker content lacks enough detail to match the target marker.";
+    } else if (darkBorderSides < 4) {
+      reason = "Square found, but not all four outer borders were confirmed.";
+    } else if (hasAnchorCandidate !== 1) {
+      reason = "Square found, but the anchor corner was not strong enough to identify reliably.";
+    } else if (coreMarkerMatch) {
+      reason = "Marker 1-like pattern found in the captured guide area.";
+    } else if (anchorContrast <= 1.5) {
+      reason = "Square found, but the anchor corner was not distinct enough.";
+    } else if (center.meanSaturation <= 32 || center.brightnessStd <= 14) {
       reason = "Square found, but the inner marker content looked too plain.";
     } else {
       reason = "Marker-like square found, but the inner content did not match strongly enough.";
@@ -462,7 +555,8 @@ export async function analyzeMarkerImage(image: NitroImage): Promise<MarkerAnaly
   return {
     isMarkerLike,
     isDesiredMarker,
-    centerCropFilePath,
+    centerCropFilePath: "",
+    bestRotation,
     metrics: {
       topBorder,
       rightBorder,
@@ -477,14 +571,52 @@ export async function analyzeMarkerImage(image: NitroImage): Promise<MarkerAnaly
       darkCornerCount,
       brightCornerCount,
       anchorContrast,
+      hasAnchorCandidate,
+      anchorFillRatio,
       centerBrightness: center.meanBrightness,
       centerStd: center.brightnessStd,
       centerSaturation: center.meanSaturation,
       ringBrightness: ring.meanBrightness,
-      warningRedness,
       centerDarkRatio,
     },
     reason,
+  };
+}
+
+export async function analyzeMarkerImage(image: NitroImage): Promise<MarkerAnalysis> {
+  const cropSize = Math.floor(Math.min(image.width, image.height) * 0.56);
+  const startX = Math.floor((image.width - cropSize) / 2);
+  const startY = Math.floor((image.height - cropSize) / 2);
+  const cropped = await image.cropAsync(startX, startY, startX + cropSize, startY + cropSize);
+
+  const rotationCandidates = [0, 45, 90, 135, 180, 225, 270, 315];
+  let bestAnalysis: MarkerAnalysis | null = null;
+  let bestImage: NitroImage | null = null;
+  let bestScore = -Infinity;
+
+  for (const rotation of rotationCandidates) {
+    const rotated =
+      rotation === 0 ? cropped : await cropped.rotateAsync(rotation, false);
+    const normalized = await rotated.resizeAsync(NORMALIZED_SIZE, NORMALIZED_SIZE);
+    const analysis = await analyzeNormalizedImage(normalized, rotation);
+    const score = getAnalysisScore(analysis.metrics);
+
+    if (score > bestScore) {
+      bestScore = score;
+      bestAnalysis = analysis;
+      bestImage = normalized;
+    }
+  }
+
+  if (!bestAnalysis || !bestImage) {
+    throw new Error("Unable to analyze the captured marker image.");
+  }
+
+  const centerCropFilePath = await bestImage.saveToTemporaryFileAsync("jpg", 85);
+
+  return {
+    ...bestAnalysis,
+    centerCropFilePath,
   };
 }
 
