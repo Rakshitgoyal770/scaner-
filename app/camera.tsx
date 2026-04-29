@@ -1,4 +1,4 @@
-import { useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { Image as NitroImage } from "react-native-nitro-image";
 import {
   Camera,
@@ -6,11 +6,32 @@ import {
   useCameraDevice,
   useCameraPermission,
 } from "react-native-vision-camera";
-import { Image, Pressable, StyleSheet, Text, View } from "react-native";
+import {
+  Image,
+  Pressable,
+  ScrollView,
+  StyleSheet,
+  Text,
+  View,
+} from "react-native";
 import { analyzeMarkerImage } from "../src/features/scanner/analyzeCapturedMarker";
 import { useMarkerScanner } from "../src/features/scanner/useMarkerScanner";
 
 const GUIDE_SIZE = 260;
+const CAPTURE_LIMIT = 20;
+
+interface CapturedMarkerItem {
+  id: string;
+  uri: string;
+  accepted: boolean;
+}
+
+interface CameraFormatCandidate {
+  photoWidth?: number;
+  photoHeight?: number;
+  videoWidth?: number;
+  videoHeight?: number;
+}
 
 function normalizeUri(filePath: string) {
   return filePath.startsWith("file://") ? filePath : `file://${filePath}`;
@@ -20,13 +41,54 @@ export default function CameraScreen() {
   const permission = useCameraPermission();
   const cameraRef = useRef<CameraRef>(null);
   const [isFacingBack, setIsFacingBack] = useState(true);
+  const [isPreviewReady, setIsPreviewReady] = useState(false);
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [analysisSummary, setAnalysisSummary] = useState(
-    "Align the desired marker inside the guide frame, then capture a stable preview snapshot."
+    "Align the marker inside the guide frame, then capture a stable preview snapshot."
   );
   const [cropPreviewUri, setCropPreviewUri] = useState<string | null>(null);
+  const [grayscalePreviewUri, setGrayscalePreviewUri] = useState<string | null>(null);
   const [metricLine, setMetricLine] = useState<string | null>(null);
+  const [capturedMarkers, setCapturedMarkers] = useState<CapturedMarkerItem[]>([]);
   const device = useCameraDevice(isFacingBack ? "back" : "front");
+  const deviceWithFormats = device as (typeof device & { formats?: CameraFormatCandidate[] }) | undefined;
+  const format = useMemo(() => {
+    if (!deviceWithFormats?.formats?.length) {
+      return undefined;
+    }
+
+    const targetSize = 2560;
+    const pickMetric = (candidate: CameraFormatCandidate) => {
+      const width = candidate.photoWidth ?? candidate.videoWidth ?? 0;
+      const height = candidate.photoHeight ?? candidate.videoHeight ?? 0;
+      const distance = Math.abs(width - targetSize) + Math.abs(height - targetSize);
+      const inRange =
+        width >= 2000 &&
+        width <= 3000 &&
+        height >= 2000 &&
+        height <= 3000;
+
+      return {
+        width,
+        height,
+        distance,
+        inRange,
+      };
+    };
+
+    const sorted = [...deviceWithFormats.formats].sort((left, right) => {
+      const a = pickMetric(left);
+      const b = pickMetric(right);
+
+      if (a.inRange !== b.inRange) {
+        return a.inRange ? -1 : 1;
+      }
+
+      return a.distance - b.distance;
+    });
+
+    return sorted[0];
+  }, [deviceWithFormats]);
   const {
     detectionState,
     capturedCount,
@@ -46,14 +108,33 @@ export default function CameraScreen() {
     }),
     []
   );
+  const isComplete = capturedMarkers.length >= CAPTURE_LIMIT;
 
-  async function handleCaptureAndAnalyze() {
-    if (isAnalyzing) {
+  useEffect(() => {
+    if (!format) {
       return;
     }
 
-    if (!cameraRef.current) {
-      setAnalysisSummary("Camera preview is not ready yet. Try again in a second.");
+    const width = format.photoWidth ?? format.videoWidth ?? 0;
+    const height = format.photoHeight ?? format.videoHeight ?? 0;
+    const valid =
+      width >= 2000 &&
+      width <= 3000 &&
+      height >= 2000 &&
+      height <= 3000;
+
+    console.log(
+      `Camera format: ${width}x${height} - ${valid ? "valid" : "out of range"}`
+    );
+  }, [format]);
+
+  async function handleCaptureAndAnalyze() {
+    if (isAnalyzing || isComplete) {
+      return;
+    }
+
+    if (!cameraRef.current || !isPreviewReady) {
+      setAnalysisSummary("Camera preview is still starting. Wait for the live feed, then try again.");
       return;
     }
 
@@ -69,15 +150,33 @@ export default function CameraScreen() {
       setAnalysisSummary("Analyzing captured guide area...");
 
       const result = await analyzeMarkerImage(snapshot);
-      setCropPreviewUri(normalizeUri(result.centerCropFilePath));
+      const guideCropUri = normalizeUri(result.centerCropFilePath);
+      const grayscaleUri = normalizeUri(result.grayscalePreviewFilePath);
+
+      setCropPreviewUri(guideCropUri);
+      setGrayscalePreviewUri(grayscaleUri);
       setMetricLine(
         `Borders ${result.metrics.darkBorderSides}/4 | Dark corners ${result.metrics.darkCornerCount} | Center saturation ${result.metrics.centerSaturation.toFixed(
           1
-        )}`
+        )} | Rotation ${result.bestRotation} deg`
       );
 
       if (result.isDesiredMarker) {
         completeCapture(centeredGuideBox);
+        setCapturedMarkers((current) => {
+          if (current.length >= CAPTURE_LIMIT) {
+            return current;
+          }
+
+          return [
+            ...current,
+            {
+              id: `${Date.now()}-${current.length}`,
+              uri: guideCropUri,
+              accepted: true,
+            },
+          ];
+        });
       } else if (result.isMarkerLike) {
         previewCandidate(centeredGuideBox);
       } else {
@@ -88,6 +187,7 @@ export default function CameraScreen() {
     } catch (error) {
       resetOverlay();
       setCropPreviewUri(null);
+      setGrayscalePreviewUri(null);
       setMetricLine(null);
       setAnalysisSummary(
         error instanceof Error
@@ -102,9 +202,11 @@ export default function CameraScreen() {
   function handleReset() {
     resetOverlay();
     setCropPreviewUri(null);
+    setGrayscalePreviewUri(null);
     setMetricLine(null);
+    setCapturedMarkers([]);
     setAnalysisSummary(
-      "Align the desired marker inside the guide frame, then capture a stable preview snapshot."
+      "Align the marker inside the guide frame, then capture a stable preview snapshot."
     );
   }
 
@@ -138,21 +240,34 @@ export default function CameraScreen() {
   return (
     <View style={styles.container}>
       <Camera
-        ref={cameraRef}
-        style={StyleSheet.absoluteFillObject}
-        device={device}
-        isActive
-        onError={(error) => {
-          setAnalysisSummary(`Camera error: ${error.message}`);
-        }}
+        {...({
+          ref: cameraRef,
+          style: StyleSheet.absoluteFillObject,
+          device,
+          isActive: true,
+          format,
+          photo: true,
+          onPreviewStarted: () => {
+            setIsPreviewReady(true);
+            setAnalysisSummary(
+              "Align the marker inside the guide frame, then capture a stable preview snapshot."
+            );
+          },
+          onPreviewStopped: () => {
+            setIsPreviewReady(false);
+          },
+          onError: (error: Error) => {
+            setIsPreviewReady(false);
+            setAnalysisSummary(`Camera error: ${error.message}`);
+          },
+        } as any)}
       />
 
       <View style={styles.topPanel}>
         <Text style={styles.title}>Marker Scanner</Text>
         <Text style={styles.subtitle}>
-          This version uses a preview snapshot instead of the photo output
-          session, which avoids the native bind crash and still lets us analyze
-          the marker inside the guide frame.
+          This build validates the centered guide crop directly, checks the border
+          and anchor pattern across several rotations, and collects up to 20 accepted markers.
         </Text>
       </View>
 
@@ -179,14 +294,14 @@ export default function CameraScreen() {
             detectionState === "captured" ? styles.statusTextCaptured : null,
           ]}
         >
-          {isAnalyzing ? "Analyzing preview snapshot..." : statusMessage}
+          {isAnalyzing ? "Analyzing preview snapshot..." : isComplete ? "20 / 20 captured" : statusMessage}
         </Text>
       </View>
 
       <View style={styles.bottomPanel}>
         <View style={styles.infoPill}>
           <Text style={styles.infoPillText}>
-            State: {detectionState} | Captured: {capturedCount} / 20
+            Accepted: {capturedMarkers.length} / {CAPTURE_LIMIT}
           </Text>
         </View>
 
@@ -196,36 +311,71 @@ export default function CameraScreen() {
           {metricLine ? <Text style={styles.metricText}>{metricLine}</Text> : null}
           {cropPreviewUri ? (
             <View style={styles.previewRow}>
-              <Image source={{ uri: cropPreviewUri }} style={styles.previewThumb} />
-              <Text style={styles.previewCaption}>
-                Guide crop used for marker validation after the snapshot was taken.
-              </Text>
+              <View style={styles.previewBlock}>
+                <Image source={{ uri: cropPreviewUri }} style={styles.previewThumb} />
+                <Text style={styles.previewTitle}>Guide Crop</Text>
+              </View>
+              {grayscalePreviewUri ? (
+                <View style={styles.previewBlock}>
+                  <Image source={{ uri: grayscalePreviewUri }} style={styles.previewThumb} />
+                  <Text style={styles.previewTitle}>Grayscale</Text>
+                </View>
+              ) : null}
             </View>
           ) : null}
         </View>
 
+        <View style={styles.galleryCard}>
+          <Text style={styles.resultLabel}>Accepted markers</Text>
+          {capturedMarkers.length === 0 ? (
+            <Text style={styles.emptyGalleryText}>
+              Accepted markers will appear here as the target marker is validated.
+            </Text>
+          ) : (
+            <ScrollView horizontal showsHorizontalScrollIndicator={false}>
+              <View style={styles.galleryRow}>
+                {capturedMarkers.map((marker, index) => (
+                  <View key={marker.id} style={styles.galleryItem}>
+                    <Image source={{ uri: marker.uri }} style={styles.galleryThumb} />
+                    <Text style={styles.galleryLabel}>{index + 1}</Text>
+                  </View>
+                ))}
+              </View>
+            </ScrollView>
+          )}
+        </View>
+
         <View style={styles.controlsRow}>
           <Pressable
-            style={[styles.primaryButton, isAnalyzing ? styles.buttonDisabled : null]}
+            style={[
+              styles.primaryButton,
+              isAnalyzing || isComplete || !isPreviewReady ? styles.buttonDisabled : null,
+            ]}
             onPress={handleCaptureAndAnalyze}
-            disabled={isAnalyzing}
+            disabled={isAnalyzing || isComplete || !isPreviewReady}
           >
             <Text style={styles.primaryButtonText}>
-              {isAnalyzing ? "Analyzing..." : "Capture & Analyze"}
+              {isComplete
+                ? "Capture Complete"
+                : isAnalyzing
+                  ? "Analyzing..."
+                  : !isPreviewReady
+                    ? "Waiting For Preview..."
+                    : "Capture & Analyze"}
             </Text>
           </Pressable>
         </View>
 
         <View style={styles.controlsRow}>
           <Pressable style={styles.secondaryButton} onPress={handleReset}>
-            <Text style={styles.secondaryButtonText}>Reset</Text>
+            <Text style={styles.secondaryButtonText}>Reset Session</Text>
           </Pressable>
           <Pressable
             style={styles.secondaryButton}
             onPress={() => setIsFacingBack((current) => !current)}
           >
             <Text style={styles.secondaryButtonText}>
-              {isFacingBack ? "Front" : "Rear"}
+              {isFacingBack ? "Front Camera" : "Rear Camera"}
             </Text>
           </Pressable>
         </View>
@@ -398,6 +548,14 @@ const styles = StyleSheet.create({
     borderColor: "rgba(255, 255, 255, 0.12)",
     padding: 14,
   },
+  galleryCard: {
+    gap: 10,
+    borderRadius: 16,
+    backgroundColor: "rgba(0, 0, 0, 0.62)",
+    borderWidth: 1,
+    borderColor: "rgba(255, 255, 255, 0.12)",
+    padding: 14,
+  },
   resultLabel: {
     color: "#9ca3af",
     fontSize: 11,
@@ -418,20 +576,46 @@ const styles = StyleSheet.create({
   },
   previewRow: {
     flexDirection: "row",
+    gap: 12,
+  },
+  previewBlock: {
+    gap: 6,
     alignItems: "center",
-    gap: 10,
   },
   previewThumb: {
-    width: 56,
-    height: 56,
-    borderRadius: 10,
+    width: 72,
+    height: 72,
+    borderRadius: 12,
     backgroundColor: "#ffffff",
   },
-  previewCaption: {
-    flex: 1,
+  previewTitle: {
+    color: "#d1d5db",
+    fontSize: 11,
+    fontWeight: "600",
+  },
+  emptyGalleryText: {
     color: "#d1d5db",
     fontSize: 12,
     lineHeight: 18,
+  },
+  galleryRow: {
+    flexDirection: "row",
+    gap: 10,
+  },
+  galleryItem: {
+    gap: 6,
+    alignItems: "center",
+  },
+  galleryThumb: {
+    width: 64,
+    height: 64,
+    borderRadius: 10,
+    backgroundColor: "#ffffff",
+  },
+  galleryLabel: {
+    color: "#ffffff",
+    fontSize: 11,
+    fontWeight: "700",
   },
   controlsRow: {
     flexDirection: "row",
@@ -471,5 +655,6 @@ const styles = StyleSheet.create({
     color: "#ffffff",
     fontSize: 13,
     fontWeight: "700",
+    textAlign: "center",
   },
 });

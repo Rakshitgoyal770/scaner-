@@ -97,6 +97,8 @@ export default function MarkerDebugScreen() {
   const [index, setIndex] = useState(0);
   const sample = samples[index];
   const analysis = analyzeSample(sample);
+  const isFirst = index === 0;
+  const isLast = index === samples.length - 1;
 
   return (
     <SafeAreaView style={styles.safeArea}>
@@ -105,8 +107,8 @@ export default function MarkerDebugScreen() {
           <Text style={styles.kicker}>Offline Marker Debug</Text>
           <Text style={styles.title}>{sample.label}</Text>
           <Text style={styles.subtitle}>
-            This screen uses bundled assignment images so we can validate the
-            detector against known samples before turning live detection back on.
+            Review bundled assignment images one by one and compare the expected
+            result with the current detector output.
           </Text>
         </View>
 
@@ -129,53 +131,22 @@ export default function MarkerDebugScreen() {
             Expected result: {sample.expected} | Auto result: {analysis.verdict}
           </Text>
           <Text style={styles.note}>{sample.note}</Text>
-        </View>
-
-        <View style={styles.infoPanel}>
-          <Text style={styles.infoText}>
-            The green frame here is the square region the current contour-based
-            detector should be finding.
-          </Text>
-          <Text style={styles.infoText}>
-            If this box looks right but live detection fails, the issue is in
-            the camera/worklet path, not the marker geometry.
-          </Text>
-        </View>
-
-        <View style={styles.rulesPanel}>
-          <Text style={styles.rulesTitle}>Rule Breakdown</Text>
-          <Text style={styles.ruleText}>
-            Near-square contour: {analysis.nearSquare ? "PASS" : "FAIL"}
-          </Text>
-          <Text style={styles.ruleText}>
-            Inner content present: {analysis.contentPresent ? "PASS" : "FAIL"}
-          </Text>
-          <Text style={styles.ruleText}>
-            Dark anchor in a corner: {analysis.anchorInCorner ? "PASS" : "FAIL"}
-          </Text>
-          <Text style={styles.ruleText}>
-            Rotated marker fallback:{" "}
-            {analysis.likelyRotatedMarker ? "PASS" : "FAIL"}
-          </Text>
-          <Text style={styles.ruleSummary}>
-            Coarse classifier: {analysis.verdict}
+          <Text style={styles.counterText}>
+            {index + 1} / {samples.length}
           </Text>
         </View>
 
         <View style={styles.controls}>
           <Pressable
-            style={[styles.button, index === 0 ? styles.buttonDisabled : null]}
-            disabled={index === 0}
+            style={[styles.button, isFirst ? styles.buttonDisabled : null]}
+            disabled={isFirst}
             onPress={() => setIndex((current) => Math.max(0, current - 1))}
           >
             <Text style={styles.buttonText}>Previous</Text>
           </Pressable>
           <Pressable
-            style={[
-              styles.button,
-              index === samples.length - 1 ? styles.buttonDisabled : null,
-            ]}
-            disabled={index === samples.length - 1}
+            style={[styles.button, isLast ? styles.buttonDisabled : null]}
+            disabled={isLast}
             onPress={() =>
               setIndex((current) => Math.min(samples.length - 1, current + 1))
             }
@@ -256,42 +227,10 @@ const styles = StyleSheet.create({
     fontSize: 14,
     textAlign: "center",
   },
-  infoPanel: {
-    gap: 8,
-    borderWidth: 1,
-    borderColor: "#1f1f1f",
-    borderRadius: 16,
-    backgroundColor: "#0a0a0a",
-    padding: 16,
-  },
-  infoText: {
-    color: "#e4e4e7",
-    fontSize: 14,
-    lineHeight: 21,
-  },
-  rulesPanel: {
-    gap: 8,
-    borderWidth: 1,
-    borderColor: "#1f1f1f",
-    borderRadius: 16,
-    backgroundColor: "#0a0a0a",
-    padding: 16,
-  },
-  rulesTitle: {
-    color: "#ffffff",
-    fontSize: 16,
-    fontWeight: "800",
-  },
-  ruleText: {
-    color: "#d4d4d8",
-    fontSize: 14,
-    lineHeight: 20,
-  },
-  ruleSummary: {
+  counterText: {
     color: "#00e676",
-    fontSize: 15,
+    fontSize: 13,
     fontWeight: "800",
-    marginTop: 4,
   },
   controls: {
     flexDirection: "row",
