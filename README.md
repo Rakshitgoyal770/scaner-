@@ -2,16 +2,80 @@
 
 Android marker-scanning assignment app built with React Native and Expo.
 
-## What the app does
+## Summary
 
-- opens a native Android camera preview
-- captures a photo snapshot for each scan
-- crops the guide area and tightens around the darkest marker blob
-- normalizes the marker to exactly `300x300`
-- validates the marker using ring-based border detection and corner-anchor analysis
-- keeps up to 20 accepted marker crops in the in-app gallery
+Saner is an Android scanner for the Alemeno internship assignment. It captures a camera snapshot, isolates the marker area, normalizes the result to exactly `300x300`, validates the structure of the marker, and stores accepted captures inside the app.
 
-## Main files
+- built with React Native and Expo
+- targets Android native camera usage
+- accepts the provided correct markers
+- rejects the provided incorrect markers
+- keeps up to 20 accepted marker results in-app
+
+## Detailed Explanation
+
+The scanner is designed around structure rather than center artwork recognition. The important idea is that a valid marker should have:
+
+- a strong border
+- a valid single corner anchor
+- a normalized crop that can be scored consistently
+
+To keep the code more human-readable, the scanner core was split into smaller files instead of leaving the whole implementation in one long analyzer file.
+
+The detector currently uses:
+
+- blob-first cropping to reduce background noise
+- ring-based border detection for rotation tolerance
+- corner-anchor analysis to distinguish valid anchors from incorrect dark blocks
+- grayscale preview generation for debugging and visual validation
+
+## Workflow
+
+1. Open the camera preview.
+2. Align the marker inside the guide frame.
+3. Tap `Capture & Analyze`.
+4. Capture a native snapshot.
+5. Crop the guide area and tighten around the darkest marker blob.
+6. Normalize the marker to `300x300`.
+7. Run border and anchor validation.
+8. If accepted, save the processed marker into the in-app gallery.
+
+## Results
+
+These reference cases are the practical validation baseline used while tuning the scanner.
+
+| Case | Reference | Grayscale | Expected |
+| --- | --- | --- | --- |
+| Correct pig marker | ![Correct pig](assets/marker-references/Marker1-TestImage1-Correct.jpg) | ![Correct pig grayscale](assets/marker-results/Marker1-TestImage1-Correct-grayscale.png) | Accepted, `Borders 4/4`, `Dark corners 1` |
+| Correct dog marker | ![Correct dog](assets/marker-references/Marker1-TestImage2-Correct.jpg) | ![Correct dog grayscale](assets/marker-results/Marker1-TestImage2-Correct-grayscale.png) | Accepted, `Borders 4/4`, `Dark corners 1` |
+| Rotated correct marker | ![Rotated correct](assets/marker-references/Marker1-TestImage3-Correct.jpg) | ![Rotated correct grayscale](assets/marker-results/Marker1-TestImage3-Correct-grayscale.png) | Accepted despite rotation |
+| Incorrect center-square marker | ![Incorrect center square](assets/marker-references/Marker1-TestImage5-Incorrect.jpg) | ![Incorrect center square grayscale](assets/marker-results/Marker1-TestImage5-Incorrect-grayscale.png) | Rejected, `No anchor corner found` |
+| Incorrect oversized-anchor marker | ![Incorrect oversized anchor](assets/marker-references/Marker1-TestImage6-Incorrect.jpg) | ![Incorrect oversized anchor grayscale](assets/marker-results/Marker1-TestImage6-Incorrect-grayscale.png) | Rejected, `Anchor square is oversized` |
+
+The grayscale images are included because the detector is designed to rely mainly on shape, border persistence, and anchor placement rather than on full original color.
+
+## Final Device Testing Screenshots
+
+Additional screenshots from final device testing and extra object-check runs are stored in:
+
+`assets/submission-screenshots`
+
+| 1 | 2 | 3 |
+| --- | --- | --- |
+| ![screen 01](assets/submission-screenshots/screen-01.jpeg) | ![screen 02](assets/submission-screenshots/screen-02.jpeg) | ![screen 03](assets/submission-screenshots/screen-03.jpeg) |
+| ![screen 04](assets/submission-screenshots/screen-04.jpeg) | ![screen 05](assets/submission-screenshots/screen-05.jpeg) | ![screen 06](assets/submission-screenshots/screen-06.jpeg) |
+| ![screen 07](assets/submission-screenshots/screen-07.jpeg) | ![screen 08](assets/submission-screenshots/screen-08.jpeg) | ![screen 09](assets/submission-screenshots/screen-09.jpeg) |
+| ![screen 10](assets/submission-screenshots/screen-10.jpeg) | ![screen 11](assets/submission-screenshots/screen-11.jpeg) | ![screen 12](assets/submission-screenshots/screen-12.jpeg) |
+
+## Achievements
+
+- created a working Android scanner app
+- built a scanner pipeline that produces exact `300x300` outputs
+- added a release APK build for device installation
+- refactored the scanner into smaller files for readability
+- documented a reference baseline using original and grayscale marker images
+
+## Main Files
 
 - `app/camera.tsx`: camera screen, capture flow, gallery, debug metrics
 - `app/marker-debug.tsx`: sample-image debug screen
@@ -53,27 +117,3 @@ The release APK is generated at:
 - the current scanner is snapshot-based, not a continuous frame-processor detector
 - the processed output size is fixed to `300x300` to match the assignment requirement
 - camera format selection prefers roughly `2560x2560` and aims to stay inside the required `2000-3000` range
-
-## Reference Cases
-
-These are the manual sanity-check outcomes currently used as the visual baseline for the assignment:
-
-- correct marker with a clear corner anchor should be accepted with:
-  - `Borders 4/4`
-  - `Dark corners 1`
-  - reason close to `Correct Marker`
-- rotated correct markers should still be accepted
-- incorrect marker with an oversized corner block should be rejected with a reason close to:
-  - `Anchor square is oversized`
-- incorrect marker with a center square instead of a corner anchor should be rejected with a reason close to:
-  - `No anchor corner found`
-
-The screenshots shared during validation showed these specific expected examples:
-
-- correct dog marker: accepted
-- correct pig marker: accepted
-- rotated correct dog/fox-style marker: accepted
-- incorrect oversized-anchor marker: rejected
-- incorrect center-square marker: rejected
-
-When tuning the detector, these cases should remain stable before changing thresholds further.
